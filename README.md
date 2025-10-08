@@ -22,7 +22,12 @@ Use the [ImageNet-100 dataset](https://www.kaggle.com/datasets/ambityga/imagenet
 * You should understand FID, the evaluation metric.
 
 ## Goal
-* Tune training hyperparameters and other training settings for DiT-S to obtain an FID score lower than 20.
+* Tune training hyperparameters and other training settings for DiT-S to obtain an FID-10K score lower than 20 at resolution 256×256. Below are some example images generated from a DiT-S model with FID=19.8.
+<p align="center">
+<img src="./images/resolution256_fid19.8.png" width=50% height=50% 
+class="center">
+</p>
+
 * More advanced: tweak the architectures to optimize FID, but stay within 33M parameters (the size of DiT-S).
 
 ## Instructions
