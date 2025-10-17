@@ -1,3 +1,9 @@
+### Create the enrionment
+conda env create -f environment.yml
+conda activate My_DiT
+
+
+
 # Project
 
 Implement a DiT-S model in JAX, and train it on ImageNet.
