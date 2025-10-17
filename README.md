@@ -1,7 +1,10 @@
 ### Create the enrionment
+```bash
 conda env create -f environment.yml
 conda activate My_DiT
-
+```
+# Stage
+Currently working on implementing Transformer
 
 
 # Project
