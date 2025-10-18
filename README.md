@@ -1,3 +1,12 @@
+### Create the enrionment
+```bash
+conda env create -f environment.yml
+conda activate My_DiT
+```
+# Stage
+Currently working on implementing Transformer
+
+
 # Project
 
 Implement a DiT-S model in JAX, and train it on ImageNet.
