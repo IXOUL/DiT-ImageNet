@@ -46,6 +46,47 @@ When adding classifier conditioning pass `num_classes` to `DiT` and provide `cla
 - **Regularisation**: The model exposes dropout knobs (`dropout`, `attn_dropout`, `class_dropout_prob`) for stability and classifier-free guidance.
 - **Evaluation**: Compute FID-10K using generated samples vs. ImageNet validation features (Inception-V3). Automate periodic evaluation to monitor convergence.
 
+## Running Training
+
+The `train` package wraps the DiT model with a diffusion loss, optimiser, EMA tracking, and checkpointing. You supply an iterator that yields batches shaped like:
+
+```python
+{"images": np.ndarray[B, H, W, 3], "labels": np.ndarray[B]}  # labels optional
+```
+
+Example skeleton:
+
+```python
+from train import DiffusionConfig, TrainingConfig, train
+from models.dit import DiT
+
+model_cfg = dict(
+    image_size=256,
+    patch_size=16,
+    dimension=1152,
+    depth=28,
+    num_heads=16,
+    mlp_ratio=4,
+    channels=3,
+    num_classes=1000,
+    class_dropout_prob=0.1,
+)
+
+training_cfg = TrainingConfig(
+    total_steps=250_000,
+    learning_rate=1e-4,
+    grad_clip_norm=1.0,
+    checkpoint_every=5_000,
+    workdir="./checkpoints/dit_s",
+)
+
+diffusion_cfg = DiffusionConfig(timesteps=1000, beta_schedule="cosine", prediction_type="eps")
+
+state = train(model_cfg, training_cfg, diffusion_cfg, train_iterator=my_dataloader())
+```
+
+Hook `my_dataloader()` to your input pipeline (e.g., TFDS `imagenet2012`, WebDataset shards, or custom NumPy loaders). Use the returned `state.ema_params` for sampling checkpoints.
+
 ## Tips for Hitting FID < 20
 
 1. Increase batch size or accumulate gradients to stabilise updates; DiT-S benefits from high effective batch.
