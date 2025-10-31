@@ -1,34 +1,41 @@
-import jax.numpy as jnp
 import flax.linen as nn
+import jax.numpy as jnp
+
 
 class PatchEmbed(nn.Module):
+    """Project images to a sequence of patch tokens with learned position encodings."""
+
+    image_size: int
     patch_size: int
     dimension: int
+    in_channels: int = 3
+
+    def setup(self):
+        patches_per_dim = self.image_size // self.patch_size
+        self.num_patches = patches_per_dim * patches_per_dim
 
     @nn.compact
     def __call__(self, x):
-        # x: shape (B, H, W, C)
-        B, H, W, C = x.shape
-        patches_h = H // self.patch_size
-        patches_w = W // self.patch_size
-        total_num_patches = patches_h * patches_w
-        
-        # 1. reshape the images into patch grids
-        # -> (B, patches_h, patch, patches_w, patch, C)
-        x = x.reshape(B, patches_h, self.patch_size, patches_w, self.patch_size, C)
+        proj = nn.Conv(
+            features=self.dimension,
+            kernel_size=(self.patch_size, self.patch_size),
+            strides=(self.patch_size, self.patch_size),
+            padding="VALID",
+            use_bias=True,
+            name="projection",
+        )(x)
 
-        # 2. transpose to bring patch dimensions together
-        # -> (B, patches_h, patches_w, patch, patch, C)
-        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
-
-        # 3. flatten patch pixels -> (B, total_num_patches, patch_size*patch_size*C)
-        x = x.reshape(B, total_num_patches, self.patch_size * self.patch_size * C)
-
-        # 4. linear projection to "dimension" for Transformer
-        x = nn.Dense(self.dimension)(x)
-
-        # 5. learned positional embedding (1, N, D)
-        pos = self.param("pos", nn.initializers.normal(0.02), (1, total_num_patches, self.dimension))
-        x = x + pos
-
-        return x, (patches_h, patches_w)
+        b, h, w, d = proj.shape
+        if h * w != self.num_patches:
+            raise ValueError(
+                f"Unexpected token count {h * w}; expected {self.num_patches} based on image size"
+            )
+        # Flatten the 2-D grid of patches into a 1-D token sequence.
+        tokens = proj.reshape(b, h * w, d)
+        pos = self.param(
+            "positional_embedding",
+            nn.initializers.normal(stddev=0.02),
+            (1, self.num_patches, self.dimension),
+        )
+        tokens = tokens + pos
+        return tokens, (h, w)

@@ -1,62 +1,134 @@
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
+
 from .patch_embed import PatchEmbed
-from .transformer import DiTEncoder
+from .transformer import AdaLayerNormZero, DiTEncoder
 from utils.time_embedding import TimeEmbedding
 
-class PatchDecoder(nn.Module):
+
+class LabelEmbedding(nn.Module):
+    """Class embedding with optional classifier-free guidance dropout."""
+
+    num_classes: int
+    dimension: int
+    dropout_prob: float = 0.0
+
+    @nn.compact
+    def __call__(self, labels, deterministic=True):
+        if labels is None:
+            raise ValueError("labels must be provided when using label conditioning")
+
+        embed = nn.Embed(
+            num_embeddings=self.num_classes + 1,
+            features=self.dimension,
+            embedding_init=nn.initializers.normal(stddev=0.02),
+            name="embedding",
+        )
+        if deterministic or self.dropout_prob <= 0.0:
+            conditioned_labels = labels
+        else:
+            keep_prob = 1.0 - self.dropout_prob
+            rng = self.make_rng("dropout")
+            # Replace a subset of labels with the null class for classifier-free guidance.
+            keep_mask = jax.random.bernoulli(rng, keep_prob, labels.shape)
+            null_label = jnp.full_like(labels, self.num_classes)
+            conditioned_labels = jnp.where(keep_mask, labels, null_label)
+        return embed(conditioned_labels)
+
+
+class FinalLayer(nn.Module):
+    """Final adaptive LayerNorm and projection back to image space."""
+
+    dimension: int
     patch_size: int
     out_channels: int
 
     @nn.compact
-    def __call__(self, x, patches_hw):
-        """
-        Reconstruct image from patch tokens
-
-            x: (B, N, D)
-            patches_hw: (patches_h, patches_w)
-            returns: (B, H, W, out_channels)
-        """
-        B, N, D = x.shape
+    def __call__(self, x, cond, patches_hw):
+        x = AdaLayerNormZero(self.dimension, name="ada_ln")(x, cond)
+        x = nn.Dense(
+            features=self.patch_size * self.patch_size * self.out_channels,
+            name="proj",
+        )(x)
+        b, n, _ = x.shape
         patches_h, patches_w = patches_hw
-        x = nn.Dense(self.patch_size**2 * self.out_channels)(x)
-        x = x.reshape(B, patches_h, patches_w, self.patch_size, self.patch_size, self.out_channels)
-        x = x.transpose(0, 1, 3, 2, 4, 5).reshape(B, patches_h * self.patch_size, patches_w * self.patch_size, self.out_channels)
+        x = x.reshape(
+            b,
+            patches_h,
+            patches_w,
+            self.patch_size,
+            self.patch_size,
+            self.out_channels,
+        )
+        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
+        x = x.reshape(
+            b,
+            patches_h * self.patch_size,
+            patches_w * self.patch_size,
+            self.out_channels,
+        )
         return x
 
 
 class DiT(nn.Module):
+    """Diffusion Transformer backbone following DiT-S architecture."""
+
     image_size: int
     patch_size: int
     dimension: int
     depth: int
     num_heads: int
-    mlp_ratio: int = 4
+    mlp_ratio: float = 4.0
     channels: int = 3
     dropout: float = 0.0
+    attn_dropout: float = 0.0
+    num_classes: int | None = None
+    class_dropout_prob: float = 0.0
 
     @nn.compact
-    def __call__(self, x, timesteps, mask=None, deterministic=True):
-        """
-            x: (B, H, W, C)
-            timesteps: (B, ) diffusion timesteps
-            returns: predicted noise / image of shape (B, H, W, C)
-        """
+    def __call__(self, x, timesteps, class_labels=None, mask=None, deterministic=True):
+        if x.shape[1] != self.image_size or x.shape[2] != self.image_size:
+            raise ValueError(
+                f"Expected square inputs of spatial size {self.image_size}, "
+                f"got H={x.shape[1]}, W={x.shape[2]}"
+            )
 
-        B, H, W, C = x.shape
+        tokens, patches_hw = PatchEmbed(
+            image_size=self.image_size,
+            patch_size=self.patch_size,
+            dimension=self.dimension,
+            in_channels=self.channels,
+        )(x)
 
-        # 1. Patch Embedding, from pixels to patches
-        x_tokens, patches_hw = PatchEmbed(self.patch_size, self.dimension)(x)
-        
-        # 2. Time Embedding
-        t_emb = TimeEmbedding(self.dimension)(timesteps)  # (B, D)
-        x_tokens = x_tokens + t_emb[:, None, :]  # broadcast to (B, N, D)
+        t_emb = TimeEmbedding(self.dimension, name="time_embedding")(timesteps)
+        if self.num_classes is not None and class_labels is not None:
+            y_emb = LabelEmbedding(
+                num_classes=self.num_classes,
+                dimension=self.dimension,
+                dropout_prob=self.class_dropout_prob,
+                name="label_embedding",
+            )(class_labels, deterministic=deterministic)
+        else:
+            y_emb = jnp.zeros_like(t_emb)
 
-        # 3. Encoder
-        x_tokens = DiTEncoder(self.depth, self.dimension, self.num_heads, self.mlp_ratio, self.dropout)(x_tokens, mask=mask, deterministic=deterministic)
+        # Shared conditioning vector injected into every Transformer block.
+        cond = t_emb + y_emb
 
-        # 4. LayerNorm + projecting patches back to pixels
-        x_tokens = nn.LayerNorm()(x_tokens)
-        x_output = PatchDecoder(self.patch_size, self.channels)(x_tokens, patches_hw)
+        tokens = DiTEncoder(
+            depth=self.depth,
+            dimension=self.dimension,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            dropout=self.dropout,
+            attn_dropout=self.attn_dropout,
+            name="transformer",
+        )(tokens, cond, mask=mask, deterministic=deterministic)
 
-        return x_output
+        output = FinalLayer(
+            dimension=self.dimension,
+            patch_size=self.patch_size,
+            out_channels=self.channels,
+            name="final_layer",
+        )(tokens, cond, patches_hw)
+        return output

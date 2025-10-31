@@ -1,56 +1,66 @@
-### Create the enrionment
+## Quick Start
+
 ```bash
 conda env create -f environment.yml
 conda activate My_DiT
 ```
-# Stage
-Currently working on implementing Transformer
 
+The environment ships with `jax[cpu]`, `flax`, and `optax` so you can develop on CPU and later move the same code to GPU/TPUs.
 
-# Project
+## Project Overview
 
-Implement a DiT-S model in JAX, and train it on ImageNet.
+This repository hosts a JAX/Flax implementation of the Diffusion Transformer (DiT) architecture, targeting the DiT-S variant (~33M parameters) described in *Scalable Diffusion Models with Transformers*. The end goal is to train on ImageNet-256 and reach FID-10K < 20 while staying within the DiT-S parameter budget.
 
-## Guide 
+## Repository Map
 
-### Compute Resources
-We will primarily use the Adroit cluster for this project.
-1. Request an account: complete the [Adroit registration form](https://forms.rc.princeton.edu/registration/?q=adroit).
-2. Read the scheduler docs: review the [SLURM guide](https://researchcomputing.princeton.edu/support/knowledge-base/slurm#gpus) to understand GPU job submission.
-3. We recommend using MIG A100 or V100 on Adroit for development and debugging.
+- `models/patch_embed.py` – Convolutional patch embedding with learned positional tokens.
+- `models/attention.py` – Multi-head self-attention with shared QKV projection and dropout controls.
+- `models/transformer.py` – DiT blocks with adaptive LayerNorm modulation and gated residual paths.
+- `models/dit.py` – End-to-end DiT backbone, including timestep and optional class-conditioning.
+- `utils/time_embedding.py` – Sinusoidal timestep embeddings followed by a small MLP.
+- `test_shape.py` – Minimal smoke test that instantiates the model and checks tensor shapes.
+- `DiT.ipynb` – Scratch notebook for experimentation (pair with the code for iteration).
 
-### JAX
-You should use [JAX](https://github.com/jax-ml/jax). This community [learning guide](https://github.com/rcrowe-google/Learning-JAX) may be helpful.
+## How the Model Works
 
-### Dataset
-Use the [ImageNet-100 dataset](https://www.kaggle.com/datasets/ambityga/imagenet100) (a subset of ImageNet-1k with 100 randomly selected classes).
+1. **Patch Embedding**: Images are split by a strided convolution into a sequence of patch tokens (`PatchEmbed`). Learnable positional embeddings retain spatial structure.
+2. **Conditioning Signals**: Timestep embeddings (`TimeEmbedding`) and optional class embeddings (`LabelEmbedding`) are summed to produce a conditioning vector shared across every transformer block. This aligns with classifier-free guidance when dropout is enabled on class labels.
+3. **DiT Blocks**: Each block applies adaptive LayerNorm to inject the conditioning signal, runs multi-head attention and an MLP, then gates each residual branch via learnable `tanh` gates. The implementation mirrors DiT-S, keeping the parameter count in budget.
+4. **Final Layer**: An adaptive LayerNorm (zero-initialised) plus linear projection reconstructs patch pixels, which are reshaped back into the image grid (`FinalLayer`).
 
-### DiT
-* You should understand the background knowledge, including [Transformers](https://arxiv.org/abs/1706.03762?utm_source=chatgpt.com) and [Diffusion models](https://arxiv.org/abs/2006.11239).
-* You should understand DiT models [Scalable Diffusion Models with Transformers](https://arxiv.org/abs/2212.09748).
-* You should understand FID, the evaluation metric.
+`test_shape.py` shows the minimal usage pattern:
 
-## Goal
-* Tune training hyperparameters and other training settings for DiT-S to obtain an FID-10K score lower than 20 at resolution 256×256. Below are some example images generated from a DiT-S model with FID=19.8.
-<p align="center">
-<img src="./images/resolution256_fid19.8.png" width=50% height=50% 
-class="center">
-</p>
+```python
+model = DiT(image_size=64, patch_size=8, dimension=256, depth=4, num_heads=8)
+params = model.init(key, dummy_x, dummy_t)
+pred = model.apply(params, dummy_x, dummy_t)
+```
 
-* More advanced: tweak the architectures to optimize FID, but stay within 33M parameters (the size of DiT-S).
+When adding classifier conditioning pass `num_classes` to `DiT` and provide `class_labels` at call time.
 
-## Instructions
-* Invite the GitHub account @r01566525 to your working GitHub repo.
-* Work independently.
-* Feel free to refer to other resources or tutorials.
-* Implement the codebase yourself as much as possible, including the attention module and the training loop; you may use AI or refer to others' code in an assisting capacity only, and you should be able to explain all the code.
+## Training Checklist
 
+- **Dataset**: Start with ImageNet-100 or ImageNet-256x256 depending on compute. Preprocess images into TFRecords or NumPy arrays for fast streaming.
+- **Objective**: Use standard diffusion training (predict noise or velocity) with variance-preserving schedules. Ensure the timestep sampler matches your diffusion process.
+- **Optimizer**: AdamW or RMSProp with warmup + cosine decay works well. Track EMA weights; FID typically uses EMA parameters.
+- **Regularisation**: The model exposes dropout knobs (`dropout`, `attn_dropout`, `class_dropout_prob`) for stability and classifier-free guidance.
+- **Evaluation**: Compute FID-10K using generated samples vs. ImageNet validation features (Inception-V3). Automate periodic evaluation to monitor convergence.
 
-## Weekly Reports
-* Submit a weekly report (within 3 pages each week, keep in the same Google Doc) at the end of each week.
-* Feel free to structure it yourself: you can include progress, issues / solutions, results, plots, or any other relevant things. Feel free to report negative results too, i.e., what has been tried but didn't work.
-* Please clearly indicate in which parts of the code you used others' code (link source) or AI, and in what capacity.
+## Tips for Hitting FID < 20
 
+1. Increase batch size or accumulate gradients to stabilise updates; DiT-S benefits from high effective batch.
+2. Tune learning rate and EMA decay jointly—too aggressive learning rates quickly degrade FID.
+3. Experiment with noise prediction vs. `v`-prediction. The latter can improve sample quality in practice.
+4. Keep augmentation light; focus on precision in the input pipeline to avoid losing colour statistics.
 
-## Contact
-Please send your weekly reports and requests for help (if any) to r01566525@gmail.com. An initial meeting with a graduate student can be scheduled by emailing this address; further meetings can be arranged if necessary.
+## References
+
+- Peebles & Xie, *Scalable Diffusion Models with Transformers*, 2022.
+- Ho et al., *Denoising Diffusion Probabilistic Models*, 2020.
+- Song et al., *Score-Based Generative Modeling through Stochastic Differential Equations*, 2021.
+
+## Communication & Reporting
+
+- Invite GitHub user `@r01566525` to your working repository.
+- Send weekly reports (≤3 pages) to `r01566525@gmail.com`, noting any AI assistance or external code references.
+- Reach out via the same email to schedule discussions or request cluster support.

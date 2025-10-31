@@ -1,61 +1,52 @@
 import math
-import jax.numpy as jnp
-import flax.linen as nn
 
-class MultiHeadSelfAttenton(nn.Module):
+import flax.linen as nn
+import jax.numpy as jnp
+
+
+class MultiHeadSelfAttention(nn.Module):
+    """Vanilla multi-head self-attention with optional dropout."""
+
     dimension: int
     num_heads: int
-    dropout: float = 0.0
+    attn_dropout: float = 0.0
+    proj_dropout: float = 0.0
 
     @nn.compact
     def __call__(self, x, mask=None, deterministic=True):
         """
-            x: (B, N, D)
-            returns: out (B, N, D), attention (B, H, N, N)
+        Compute multi-head self-attention.
+
+        Args:
+            x: Input tensor of shape (B, N, D).
+            mask: Optional attention mask with broadcastable shape.
+            deterministic: Disable dropout when True.
+
+        Returns:
+            Tensor of shape (B, N, D) after attention.
         """
-        
-        # x.shape = (batchsize, number of tokens, dimension)
-        # every token is a D-dimension vector, including the information of an image patch
-        B, N, D = x.shape
-        H = self.num_heads
-        head_dimension = D // H
+        b, n, d = x.shape
+        h = self.num_heads
+        head_dim = d // h
+        if d % h != 0:
+            raise ValueError("dimension must be divisible by num_heads")
 
-        assert D % H == 0, "dimension must be divisible by number of heads"
-
-        # QKV projection
-        qkv = nn.Dense(D * 3)(x)  # qkv.shape = (B, N, 3 * D)
-        qkv = qkv.reshape(B, N, 3, H, head_dimension)
-        qkv = qkv.transpose(2, 0, 3, 1, 4)  # qkv.shape = (3, B, H, N, head_dimension)
+        # Project once to obtain queries, keys, and values (saves parameters).
+        qkv = nn.Dense(features=d * 3, use_bias=False, name="qkv")(x)
+        qkv = qkv.reshape(b, n, 3, h, head_dim)
+        qkv = jnp.transpose(qkv, (2, 0, 3, 1, 4))
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # Scaled dot-product attention
-        values, attention = self.scaled_dot_product(q, k, v, mask=mask)
-        # Apply dropout to attention output
-        values = nn.Dropout(rate=self.dropout)(values, deterministic=deterministic)
-
-        # Concatenate heads and project back to D
-        values = values.transpose(0, 2, 1, 3).reshape(B, N, D)
-        output = nn.Dense(D)(values)
-
-        return output, attention
-
-    @staticmethod
-    def scaled_dot_product(q, k, v, mask=None):
-        # q, k, v shape = (B, H, N, head_dim)
-        d_k = q.shape[-1]
-
-        # 1. compute attention logits = Q @ K^T / sqrt(d_k)
-        attn_logits = jnp.matmul(q, jnp.swapaxes(k, -2, -1))
-        attn_logits = attn_logits / math.sqrt(d_k)
-
-        # 2. apply mask if provided (mask 0 = ignore)
+        scale = 1.0 / math.sqrt(head_dim)
+        # Attention logits computed in float32 for stability.
+        attn_logits = jnp.einsum("bhqd,bhkd->bhqk", q * scale, k)
         if mask is not None:
-            attn_logits = jnp.where(mask == 0, -9e15, attn_logits)
+            attn_logits = jnp.where(mask == 0, -1e9, attn_logits)
+        attn = nn.softmax(attn_logits, axis=-1)
+        attn = nn.Dropout(rate=self.attn_dropout)(attn, deterministic=deterministic)
 
-        # 3. softmax to get normalized attention weights
-        attention = nn.softmax(attn_logits, axis=-1)
-
-        # 4. weighted sum of values
-        values = jnp.matmul(attention, v)
-
-        return values, attention
+        values = jnp.einsum("bhqk,bhkd->bhqd", attn, v)
+        values = jnp.transpose(values, (0, 2, 1, 3)).reshape(b, n, d)
+        values = nn.Dense(features=d, use_bias=False, name="proj")(values)
+        values = nn.Dropout(rate=self.proj_dropout)(values, deterministic=deterministic)
+        return values
